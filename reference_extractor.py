@@ -4,81 +4,94 @@ from collections import Counter
 import numpy as np
 
 class AutoReferenceExtractor:
-    """
-    Estrae automaticamente il volto del soggetto principale dal video
-    senza bisogno di una foto esterna
-    """
     
-    def extract_main_face_from_video(self, video_path, sample_interval=5):
-        """
-        Analizza il video e identifica il volto che appare più spesso
-        sample_interval: analizza 1 frame ogni N per velocizzare
-        """
+    def extract_main_face_from_video(self, video_path, sample_interval=1):
+        # sample_interval si può estendere per avere maggiore efficienza
+        
         cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # CAP_PROP_FRAME_COUNT retrieves the total number of frames in a video file
         
         # Dizionario: encoding -> contatore apparizioni
-        face_counter = {}
-        face_images = {}  # salva un'immagine di esempio per ogni volto unico
+        face_counter = []
+        face_images = []  # salva un'immagine di esempio per ogni volto unico
+        known_face_encodings = []
         
         frame_idx = 0
         print(f"Analisi {total_frames} frame per identificare il soggetto principale...")
         
-        while True:
-            ret, frame = cap.read()
+        for i in range(0, total_frames):
+            ret, frame = cap.read()    # cap.read() returns a bool (true if the frame has been read properly) and the frame itself
             if not ret:
                 break
             
-            # Analisi ogni N frame
+            
+            
             if frame_idx % sample_interval == 0:
-                # Riduci risoluzione per velocizzare
-                small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-                rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                #nome_file = f"frame_{i:02d}.jpg"
+                #cv2.imwrite(nome_file, rgb)
+                #print("Frame saved successfully!")
                 
-                # Trova volti
-                face_locations = face_recognition.face_locations(rgb)
+                # find faces
+                face_locations = face_recognition.face_locations(rgb)         
+                # detects the presence and locations of human faces in a given image; it takes a numpy array representing an image in RGB color format and returns a list of tuples, where each tuple contains the coordinates of a detected face
                 face_encodings = face_recognition.face_encodings(rgb, face_locations)
+                # converts the facial features of detected faces in an image into a compact numerical representation. It generates a 128-dimensional vector (a list of 128 numbers) for each face, which acts as a unique signature for that person. 
                 
-                for i, encoding in enumerate(face_encodings):
-                    # Converti encoding in tuple per usarlo come chiave
-                    enc_tuple = tuple(encoding)
+
+                #if (len(face_encodings)>0):
+                    #print("Abbiamo ", {len(face_encodings)}, " facce")
+                    #print(face_encodings[0])
+
+                
+
+                for encoding in face_encodings:
+                    trovato = False
+
+                    # da rivedere 
+                    for index, known_encoding in enumerate(known_face_encodings):
+                        risultato = face_recognition.compare_faces([known_encoding], encoding, tolerance=0.6)
+
+                        if risultato[0]:
+                            # Se la persona esiste già, aggiorna magari l'immagine di riferimento (opzionale)
+                            face_images[index] = frame 
+                            trovato = True
+                            face_counter[index] += 1 
+                            break # Esci dal ciclo: abbiamo trovato chi è
                     
-                    # Conta occorrenze
-                    if enc_tuple not in face_counter:
-                        # Salva l'immagine del volto (scalata alla dimensione originale)
-                        top, right, bottom, left = face_locations[i]
-                        # Scala indietro le coordinate (perché abbiamo ridotto del 50%)
-                        top *= 2
-                        right *= 2
-                        bottom *= 2
-                        left *= 2
-                        face_img = frame[top:bottom, left:right]
-                        face_images[enc_tuple] = face_img
-                    
-                    face_counter[enc_tuple] = face_counter.get(enc_tuple, 0) + 1
+                    # 2. Se NON è stato trovato, aggiungilo come nuova persona
+                    if not trovato:
+                        known_face_encodings.append(encoding) # Salva l'encoding per i prossimi confronti
+                        face_images.append(frame)             # Salva il frame corrispondente
+                        face_counter.append(1)
+                        print(f"Nuova persona rilevata! Totale: {len(known_face_encodings)}")
             
             frame_idx += 1
-            if frame_idx % 100 == 0:
-                print(f"Analizzati {frame_idx}/{total_frames} frame")
         
+
         cap.release()
         
         if not face_counter:
             raise ValueError("Nessun volto trovato nel video")
         
         # Trova il volto più frequente (soggetto principale)
-        main_face_enc = max(face_counter, key=face_counter.get)
-        main_face_image = face_images[main_face_enc]
+        idx = face_counter.index(max(face_counter))
         
         print(f"\nSoggetto principale identificato!")
-        print(f"Apparso in {face_counter[main_face_enc]} frame su {frame_idx // sample_interval} analizzati")
+        print(f"Apparso in {face_counter[idx]} frame su {frame_idx // sample_interval} analizzati")
         
-        return main_face_image, main_face_enc
+        return face_images[idx]
+
+
+
+
+
+
 
 # Utilizzo
 extractor = AutoReferenceExtractor()
-reference_image, reference_encoding = extractor.extract_main_face_from_video("YW_WILTY_EP70_truth15.mp4")
+reference_image = extractor.extract_main_face_from_video("YW_WILTY_EP70_truth15.mp4")
 
 # Salva la reference image per future analisi
-#cv2.imwrite("reference_face.jpg", reference_image)
-print(reference_image)
+cv2.imwrite("reference_face.jpg", reference_image)
