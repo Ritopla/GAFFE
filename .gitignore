@@ -1,0 +1,29 @@
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ── Virtual Environment ──────────────────────────────
+.venv/
+venv/
+env/
+
+# ── ML Models (download separately, see README) ─────
+models/
+
+# ── Data & Results (generated, not tracked) ──────────
+datasets/
+results/
+charts/
+
+# ── OS / IDE ─────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Jupyter ──────────────────────────────────────────
+.ipynb_checkpoints/
