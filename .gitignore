@@ -13,7 +13,7 @@ env/
 models/
 
 # ── Data & Results (generated, not tracked) ──────────
-datasets/
+datasets
 results/
 charts/
 
