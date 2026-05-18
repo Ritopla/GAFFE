@@ -226,10 +226,15 @@ def run_demo_on_video(
     python_path: str = sys.executable,
 ) -> Path | None:
     """
-    Run demo.py on a single video file to produce GAFFE JSON.
+    Run detection/detect.py on a single video file to produce a GAFFE JSON.
 
-    If output_dir is given, the JSON is written there instead of next
-    to the video (which may be on a read-only mount like Google Drive).
+    The script is invoked as a module (``-m detection.detect``) so that
+    package-relative imports work correctly regardless of the caller's cwd.
+    The working directory is always set to the project root (two levels up
+    from this file), which is required for the module resolution to succeed.
+
+    If output_dir is given the JSON is written there instead of next to the
+    video — useful when the video lives on a read-only mount (e.g. Google Drive).
 
     Returns the path to the generated JSON, or None on failure.
     """
@@ -242,21 +247,27 @@ def run_demo_on_video(
     if gaffe_json.exists():
         return gaffe_json
 
-    demo_script = Path(__file__).parent.parent / "detection" / "demo.py"
-    if not demo_script.exists():
-        print(f"  Warning: demo.py not found at {demo_script}", file=sys.stderr)
-        return None
+    # Project root — needed as cwd so `python -m detection.detect` resolves.
+    project_root = Path(__file__).parent.parent
 
+    # Invoke as a module, not as a bare script, so package imports work.
     cmd = [
-        python_path, str(demo_script), str(video_path),
-        "--no-display", "--output", str(gaffe_json),
+        python_path, "-m", "detection.detect",
+        str(video_path),
+        "--no-display",
+        "--output", str(gaffe_json),
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=str(project_root),
         )
         if result.returncode != 0:
-            print(f"  Error processing {video_path.name}: {result.stderr[:200]}",
+            # Print full stderr so errors are visible without truncation.
+            print(f"  Error processing {video_path.name}:\n{result.stderr}",
                   file=sys.stderr)
             return None
     except subprocess.TimeoutExpired:
@@ -274,21 +285,24 @@ def batch_analyze(
     generate_charts: bool = False,
     chart_format: str = "png",
     chart_dpi: int = 150,
+    summary_only: bool = True,
 ) -> dict[str, Any]:
     """
     Analyze all GAFFE JSON files in a directory.
 
-    If process_videos=True, first runs demo.py on any unprocessed video files.
+    If process_videos=True, first runs detect.py on any unprocessed video files.
 
     Args:
-        directory: Path containing video files and/or _gaffe.json files.
-        output_dir: Writable directory for outputs (JSON, charts). If None,
-            defaults to the input directory (requires write access).
-        process_videos: If True, run demo.py on unprocessed videos first.
+        directory:      Path containing video files and/or _gaffe.json files.
+        output_dir:     Writable directory for outputs (JSON, charts). If None,
+                        defaults to the input directory (requires write access).
+        process_videos: If True, run detect.py on unprocessed videos first.
         window_seconds: Temporal window for per-video analysis.
         generate_charts: Generate per-video dashboard charts.
-        chart_format: Chart image format.
-        chart_dpi: Chart DPI.
+        chart_format:   Chart image format ('png', 'pdf', 'svg').
+        chart_dpi:      Chart resolution in DPI.
+        summary_only:   If True (default), generate only the summary dashboard
+                        per video. If False, generate all individual charts.
 
     Returns:
         Complete batch analysis dict with per-video results and group comparison.
@@ -340,6 +354,7 @@ def batch_analyze(
                 generate_all_charts(
                     data, analysis, charts_dir,
                     fmt=chart_format, dpi=chart_dpi,
+                    summary_only=summary_only,
                 )
                 print(f"  ✓ {gf.name} (label={label or '?'}) — charts generated")
             except Exception as e:

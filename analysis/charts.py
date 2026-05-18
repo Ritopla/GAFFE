@@ -45,6 +45,25 @@ COLORS = {
     "text_light": "#8D99AE",
 }
 
+# Color palette per le 7 emozioni FER
+EMOTION_COLORS = {
+    "angry":    "#E63946",  # rosso
+    "fear":     "#9D4EDD",  # viola
+    "disgust":  "#2A9D8F",  # verde acqua
+    "happy":    "#FFD166",  # giallo
+    "sad":      "#457B9D",  # blu
+    "surprise": "#F77F00",  # arancio
+    "neutral":  "#8D99AE",  # grigio
+}
+
+# Ordine canonico delle emozioni per visualizzazioni e summary
+FER_EMOTION_NAMES = (
+    "angry", "disgust", "fear", "happy", "sad", "surprise", "neutral",
+)
+
+# Emozioni considerate "di stress" da FER (contribuiscono allo stress score)
+FER_STRESS_EMOTIONS = ("angry", "fear", "disgust")
+
 
 def _apply_style(fig, ax):
     """Apply consistent styling to a chart."""
@@ -687,7 +706,443 @@ def plot_summary_dashboard(
 
 
 # ──────────────────────────────────────────────────────────────
-# Generate all charts at once
+# FER-specific charts
+# ──────────────────────────────────────────────────────────────
+
+
+def _detected_fer_frames(data: dict) -> list[dict]:
+    """Frame con volto rilevato per uno schema FER (emotions non null)."""
+    return [
+        f for f in data["frames"]
+        if f.get("face_detected") and f.get("emotions") is not None
+    ]
+
+
+def plot_emotion_timeline_fer(
+    data: dict,
+    smoothing_window: int = 15,
+    figsize: tuple[float, float] = (14, 5),
+) -> "plt.Figure":
+    """
+    Andamento temporale delle 7 emozioni FER (sovrapposte come linee).
+
+    Le emozioni "di stress" (angry, fear, disgust) sono evidenziate, le altre
+    sono disegnate più sottili / trasparenti.
+    """
+    _check_matplotlib()
+
+    fps = data["metadata"].get("video_fps", 30.0)
+    frames = _detected_fer_frames(data)
+
+    if not frames:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, "No face detected", ha="center", va="center")
+        return fig
+
+    times = np.array([f["frame_id"] / fps for f in frames])
+    kernel = np.ones(smoothing_window) / smoothing_window
+
+    fig, ax = plt.subplots(figsize=figsize)
+    _apply_style(fig, ax)
+
+    for name in FER_EMOTION_NAMES:
+        vals = np.array([f["emotions"].get(name, 0.0) for f in frames])
+        if len(vals) >= smoothing_window:
+            vals = np.convolve(vals, kernel, mode="same")
+        is_stress = name in FER_STRESS_EMOTIONS
+        ax.plot(
+            times, vals,
+            color=EMOTION_COLORS[name],
+            linewidth=1.8 if is_stress else 1.0,
+            alpha=1.0 if is_stress else 0.55,
+            label=name + (" ★" if is_stress else ""),
+        )
+
+    ax.set_xlim(times[0], times[-1])
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Time (s)", fontsize=10, color=COLORS["text"])
+    ax.set_ylabel("Emotion intensity", fontsize=10, color=COLORS["text"])
+    ax.set_title(
+        f"FER Emotion Timeline — {data['metadata'].get('video_file', '?')}",
+        fontsize=13, fontweight="bold", color=COLORS["text"], pad=15,
+    )
+    ax.legend(
+        fontsize=8, loc="upper left", framealpha=0.9,
+        ncol=4, title="★ = stress emotion",
+    )
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_emotion_contributions_fer(
+    data: dict,
+    smoothing_window: int = 15,
+    figsize: tuple[float, float] = (14, 5),
+) -> "plt.Figure":
+    """
+    Stacked area: contributo pesato di angry/fear/disgust allo stress score.
+    """
+    _check_matplotlib()
+
+    fps = data["metadata"].get("video_fps", 30.0)
+    frames = _detected_fer_frames(data)
+
+    if not frames:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, "No face detected", ha="center", va="center")
+        return fig
+
+    times = np.array([f["frame_id"] / fps for f in frames])
+    weights = (frames[0].get("stress") or {}).get("weights_used", {})
+
+    kernel = np.ones(smoothing_window) / smoothing_window
+    series: dict[str, np.ndarray] = {}
+    for name in FER_STRESS_EMOTIONS:
+        w = float(weights.get(name, 1.0))
+        arr = np.array([f["emotions"].get(name, 0.0) * w for f in frames])
+        if len(arr) >= smoothing_window:
+            arr = np.convolve(arr, kernel, mode="same")
+        series[name] = arr
+
+    fig, ax = plt.subplots(figsize=figsize)
+    _apply_style(fig, ax)
+
+    ax.stackplot(
+        times,
+        *[series[n] for n in FER_STRESS_EMOTIONS],
+        labels=[
+            f"{n} (w={weights.get(n, 1.0):g})" for n in FER_STRESS_EMOTIONS
+        ],
+        colors=[EMOTION_COLORS[n] for n in FER_STRESS_EMOTIONS],
+        alpha=0.85,
+    )
+
+    ax.set_xlim(times[0], times[-1])
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Time (s)", fontsize=10, color=COLORS["text"])
+    ax.set_ylabel("Weighted contribution", fontsize=10, color=COLORS["text"])
+    ax.set_title(
+        f"FER Emotion Contributions — {data['metadata'].get('video_file', '?')}",
+        fontsize=13, fontweight="bold", color=COLORS["text"], pad=15,
+    )
+    ax.legend(fontsize=9, loc="upper left", framealpha=0.9)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_emotion_bars_fer(
+    analysis: dict,
+    figsize: tuple[float, float] = (11, 6),
+) -> "plt.Figure":
+    """
+    Doppio bar chart orizzontale: media grezza di ciascuna delle 7 emozioni
+    + contributo pesato allo stress (solo angry/fear/disgust).
+    """
+    _check_matplotlib()
+
+    breakdown = analysis.get("emotion_breakdown", {})
+    if not breakdown:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        return fig
+
+    names      = list(FER_EMOTION_NAMES)
+    raw_means  = [breakdown[n]["raw_mean"] for n in names]
+    weighted   = [breakdown[n]["weighted_contribution"] for n in names]
+    pcts       = [breakdown[n]["contribution_pct"] for n in names]
+    bar_colors = [EMOTION_COLORS[n] for n in names]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    _apply_style(fig, ax1)
+    _apply_style(fig, ax2)
+
+    # Sinistra: media grezza di ogni emozione
+    bars1 = ax1.barh(names, raw_means, color=bar_colors, height=0.6, alpha=0.85)
+    ax1.set_xlim(0, max(1.0, max(raw_means) * 1.2))
+    ax1.set_xlabel("Raw mean value", fontsize=10, color=COLORS["text"])
+    ax1.set_title("Mean emotion intensity",
+                  fontsize=12, fontweight="bold", color=COLORS["text"])
+    for bar, val in zip(bars1, raw_means):
+        ax1.text(val + 0.01, bar.get_y() + bar.get_height() / 2,
+                 f"{val:.3f}", va="center", fontsize=9, color=COLORS["text"])
+
+    # Destra: contributo pesato allo stress
+    bars2 = ax2.barh(names, weighted, color=bar_colors, height=0.6, alpha=0.85)
+    ax2.set_xlim(0, max(0.01, max(weighted) * 1.5))
+    ax2.set_xlabel("Weighted contribution", fontsize=10, color=COLORS["text"])
+    ax2.set_title("Contribution to stress score",
+                  fontsize=12, fontweight="bold", color=COLORS["text"])
+    for bar, val, pct in zip(bars2, weighted, pcts):
+        label = f"{val:.3f} ({pct:.1f}%)" if val > 0 else "—"
+        ax2.text(val + max(weighted) * 0.02, bar.get_y() + bar.get_height() / 2,
+                 label, va="center", fontsize=9, color=COLORS["text"])
+
+    fig.suptitle(
+        f"FER Emotion Breakdown — {analysis.get('source_file', '?')}",
+        fontsize=14, fontweight="bold", color=COLORS["text"], y=1.02,
+    )
+    fig.tight_layout()
+    return fig
+
+
+def plot_summary_dashboard_fer(
+    data: dict,
+    analysis: dict,
+    smoothing_window: int = 15,
+    figsize: tuple[float, float] = (20, 14),
+) -> "plt.Figure":
+    """
+    Dashboard riepilogativa per il pipeline FER.
+
+    Layout (3 righe):
+      Row 1: Stress timeline                                          [full]
+      Row 2: Emotion contributions stacked area                       [full]
+      Row 3: Level donut | Emotion bars | Key stats panel
+    """
+    _check_matplotlib()
+    from matplotlib.gridspec import GridSpec
+
+    fps = data["metadata"].get("video_fps", 30.0)
+    frames = _detected_fer_frames(data)
+    video_name = data["metadata"].get("video_file", "Unknown")
+    total_frames = data["metadata"].get(
+        "total_frames_processed", len(data["frames"])
+    )
+    duration_s = total_frames / fps
+
+    fig = plt.figure(figsize=figsize)
+    fig.patch.set_facecolor(COLORS["bg"])
+
+    gs = GridSpec(
+        3, 3, figure=fig,
+        height_ratios=[1.0, 0.8, 1.0],
+        hspace=0.35, wspace=0.35,
+    )
+
+    fig.suptitle(
+        f"FER Stress Analysis — {video_name}",
+        fontsize=18, fontweight="bold", color=COLORS["text"], y=0.98,
+    )
+
+    if not frames:
+        ax = fig.add_subplot(gs[:, :])
+        ax.text(0.5, 0.5, "No face detected in video",
+                ha="center", va="center",
+                fontsize=16, color=COLORS["text_light"])
+        ax.set_facecolor(COLORS["bg"])
+        ax.axis("off")
+        return fig
+
+    times = np.array([f["frame_id"] / fps for f in frames])
+    scores = np.array([f["stress"]["score"] for f in frames])
+    kernel = np.ones(smoothing_window) / smoothing_window
+    smoothed = (
+        np.convolve(scores, kernel, mode="same")
+        if len(scores) >= smoothing_window else scores
+    )
+
+    # ── Row 1: Stress Timeline ────────────────────────────────
+    ax1 = fig.add_subplot(gs[0, :])
+    _apply_style(fig, ax1)
+
+    band_levels = [
+        (0.00, 0.25, COLORS["LOW"], "LOW", 0.08),
+        (0.25, 0.50, COLORS["MODERATE"], "MOD", 0.08),
+        (0.50, 0.75, COLORS["HIGH"], "HIGH", 0.08),
+        (0.75, 1.00, COLORS["VERY_HIGH"], "V.HIGH", 0.08),
+    ]
+    for y_low, y_high, color, label, alpha in band_levels:
+        ax1.axhspan(y_low, y_high, color=color, alpha=alpha)
+        ax1.text(
+            times[-1] * 1.005, (y_low + y_high) / 2, label,
+            fontsize=7, color=color, va="center",
+            alpha=0.9, fontweight="bold",
+        )
+
+    ax1.plot(times, scores, color=COLORS["stress_line"], alpha=0.15, linewidth=0.5)
+    ax1.plot(times, smoothed, color=COLORS["stress_line"], linewidth=2.0, label="Smoothed")
+    ax1.fill_between(times, 0, smoothed, color=COLORS["stress_fill"], alpha=0.1)
+
+    ax1.set_xlim(times[0], times[-1])
+    ax1.set_ylim(0, 1)
+    ax1.set_xlabel("Time (s)", fontsize=10, color=COLORS["text"])
+    ax1.set_ylabel("Stress Score", fontsize=10, color=COLORS["text"])
+    ax1.set_title("Stress Timeline", fontsize=12, fontweight="bold",
+                  color=COLORS["text"], loc="left", pad=8)
+    ax1.legend(fontsize=8, loc="upper right", framealpha=0.9)
+
+    # ── Row 2: Emotion Contributions Stacked Area ─────────────
+    ax2 = fig.add_subplot(gs[1, :])
+    _apply_style(fig, ax2)
+
+    weights = (frames[0].get("stress") or {}).get("weights_used", {})
+    series: dict[str, np.ndarray] = {}
+    for name in FER_STRESS_EMOTIONS:
+        w = float(weights.get(name, 1.0))
+        arr = np.array([f["emotions"].get(name, 0.0) * w for f in frames])
+        if len(arr) >= smoothing_window:
+            arr = np.convolve(arr, kernel, mode="same")
+        series[name] = arr
+
+    ax2.stackplot(
+        times,
+        *[series[n] for n in FER_STRESS_EMOTIONS],
+        labels=[
+            f"{n} (w={weights.get(n, 1.0):g})" for n in FER_STRESS_EMOTIONS
+        ],
+        colors=[EMOTION_COLORS[n] for n in FER_STRESS_EMOTIONS],
+        alpha=0.85,
+    )
+    stack_total = sum(series.values())
+    ax2.set_xlim(times[0], times[-1])
+    ax2.set_ylim(0, max(0.6, float(np.max(stack_total)) * 1.1))
+    ax2.set_xlabel("Time (s)", fontsize=10, color=COLORS["text"])
+    ax2.set_ylabel("Weighted Contribution", fontsize=10, color=COLORS["text"])
+    ax2.set_title("Emotion Contributions Over Time",
+                  fontsize=12, fontweight="bold",
+                  color=COLORS["text"], loc="left", pad=8)
+    ax2.legend(fontsize=8, loc="upper right", framealpha=0.9)
+
+    # ── Row 3, Left: Level Distribution Donut ─────────────────
+    ax3 = fig.add_subplot(gs[2, 0])
+    ax3.set_facecolor(COLORS["bg"])
+
+    levels_list = [f["stress"]["level"] for f in frames]
+    level_order = ["LOW", "MODERATE", "HIGH", "VERY_HIGH"]
+    counts = [levels_list.count(l) for l in level_order]
+
+    pie_labels, pie_sizes, pie_colors = [], [], []
+    for l, c in zip(level_order, counts):
+        if c > 0:
+            pie_labels.append(l)
+            pie_sizes.append(c)
+            pie_colors.append(COLORS[l])
+
+    if pie_sizes:
+        wedges, texts, autotexts = ax3.pie(
+            pie_sizes, labels=pie_labels, colors=pie_colors,
+            autopct="%1.1f%%", startangle=90, pctdistance=0.80,
+            wedgeprops={"width": 0.4, "edgecolor": "white", "linewidth": 2},
+        )
+        for t in texts:
+            t.set_fontsize(9)
+            t.set_color(COLORS["text"])
+            t.set_fontweight("bold")
+        for t in autotexts:
+            t.set_fontsize(8)
+            t.set_color(COLORS["text"])
+
+    mean_score = float(np.mean(scores))
+    ax3.text(0, 0.04, f"{mean_score:.2f}", ha="center", va="center",
+             fontsize=22, fontweight="bold", color=COLORS["text"])
+    ax3.text(0, -0.12, "mean", ha="center", va="center",
+             fontsize=9, color=COLORS["text_light"])
+    ax3.set_title("Level Distribution", fontsize=12, fontweight="bold",
+                  color=COLORS["text"], pad=10)
+
+    # ── Row 3, Center: Emotion Bars ───────────────────────────
+    ax4 = fig.add_subplot(gs[2, 1])
+    _apply_style(fig, ax4)
+
+    breakdown = analysis.get("emotion_breakdown", {})
+    if breakdown:
+        names    = list(FER_EMOTION_NAMES)
+        weighted = [breakdown[n]["weighted_contribution"] for n in names]
+        raw_means = [breakdown[n]["raw_mean"] for n in names]
+        colors_  = [EMOTION_COLORS[n] for n in names]
+
+        bars = ax4.barh(names, weighted, color=colors_, height=0.6, alpha=0.85)
+        ax4.set_xlim(0, max(0.01, max(weighted) * 1.6))
+        for bar, w, raw in zip(bars, weighted, raw_means):
+            label = f"{w:.3f}" if w > 0 else f"(raw={raw:.2f})"
+            ax4.text(
+                w + max(weighted) * 0.02,
+                bar.get_y() + bar.get_height() / 2,
+                label, va="center", fontsize=8, color=COLORS["text"],
+            )
+        ax4.set_xlabel("Weighted contribution", fontsize=9, color=COLORS["text"])
+        ax4.set_title("Emotion breakdown",
+                      fontsize=12, fontweight="bold",
+                      color=COLORS["text"], pad=10)
+
+    # ── Row 3, Right: Key Stats Panel ─────────────────────────
+    ax5 = fig.add_subplot(gs[2, 2])
+    ax5.set_facecolor(COLORS["bg"])
+    ax5.axis("off")
+
+    summary = analysis.get("summary", {})
+    ss = summary.get("stress_score", {})
+    temporal = analysis.get("temporal_profile", {})
+    peaks = analysis.get("peaks_and_valleys", {})
+
+    stats_lines = [
+        ("VIDEO INFO", None),
+        (f"Duration: {duration_s:.1f}s  •  {total_frames} frames", COLORS["text"]),
+        (f"Resolution: {data['metadata'].get('video_resolution', '?')}", COLORS["text"]),
+        (f"Method: FER (emotion-based)", COLORS["text"]),
+        (f"Face Detection: {summary.get('detection_rate', 0):.1f}%", COLORS["text"]),
+        ("", None),
+        ("STRESS SCORE", None),
+        (f"Mean: {ss.get('mean', 0):.4f}  ±  {ss.get('std', 0):.4f}", COLORS["text"]),
+        (f"95% CI: [{ss.get('ci_95_lower', 0):.4f}, {ss.get('ci_95_upper', 0):.4f}]", COLORS["text"]),
+        (f"Median: {ss.get('median', 0):.4f}", COLORS["text"]),
+        (f"Range: [{ss.get('min', 0):.4f}, {ss.get('max', 0):.4f}]", COLORS["text"]),
+        (f"IQR: [{ss.get('p25', 0):.4f}, {ss.get('p75', 0):.4f}]", COLORS["text"]),
+        ("", None),
+        ("DYNAMICS", None),
+        (f"Overall trend: {temporal.get('overall_trend', '?')}", COLORS["text"]),
+    ]
+
+    if breakdown:
+        top_emo = max(
+            FER_STRESS_EMOTIONS,
+            key=lambda n: breakdown[n]["weighted_contribution"],
+        )
+        stats_lines.append(
+            (f"Top stress emotion: {top_emo} "
+             f"({breakdown[top_emo]['contribution_pct']:.1f}%)",
+             COLORS["text"])
+        )
+
+    peak_list = peaks.get("peaks", [])
+    if peak_list:
+        p = peak_list[0]
+        stats_lines.append(("", None))
+        stats_lines.append(("PEAK STRESS", None))
+        stats_lines.append(
+            (f"t={p['timestamp_s']:.1f}s  score={p['score_smoothed']:.3f}  "
+             f"[{str(p.get('dominant_metric', '?')).upper()}]",
+             COLORS["stress_line"])
+        )
+
+    y_pos = 0.95
+    for text, color in stats_lines:
+        if color is None and text:
+            ax5.text(0.05, y_pos, text, transform=ax5.transAxes,
+                     fontsize=10, fontweight="bold", color=COLORS["text"],
+                     fontfamily="monospace")
+            y_pos -= 0.005
+            ax5.plot([0.05, 0.95], [y_pos, y_pos],
+                     color=COLORS["grid"], linewidth=0.8,
+                     transform=ax5.transAxes, clip_on=False)
+            y_pos -= 0.045
+        elif text == "":
+            y_pos -= 0.03
+        else:
+            ax5.text(0.08, y_pos, text, transform=ax5.transAxes,
+                     fontsize=9, color=color, fontfamily="monospace")
+            y_pos -= 0.055
+
+    ax5.set_title("Key Statistics", fontsize=12, fontweight="bold",
+                  color=COLORS["text"], pad=10)
+
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────
+# Generate all charts at once (dispatcher fer / landmark)
 # ──────────────────────────────────────────────────────────────
 
 
@@ -697,23 +1152,29 @@ def generate_all_charts(
     output_dir: str | Path,
     fmt: str = "png",
     dpi: int = 150,
+    summary_only: bool = True,
 ) -> list[Path]:
     """
-    Generate all charts and save them to the output directory.
+    Generate charts for a single GAFFE JSON analysis.
 
-    Produces:
-      - A comprehensive summary dashboard (primary output)
-      - Individual detailed charts for deeper analysis
+    Automatically selects the correct chart set based on the detection method
+    (landmark or fer) recorded in the analysis.
+
+    By default only the summary dashboard is generated (one file). Pass
+    ``summary_only=False`` (via the ``--all-charts`` CLI flag) to also produce
+    the individual per-metric / per-emotion charts.
 
     Args:
-        data: Loaded GAFFE JSON (raw frame data).
-        analysis: Analysis dict from analyze_single_video().
-        output_dir: Directory to save chart images.
-        fmt: Image format (png, pdf, svg).
-        dpi: Resolution.
+        data:         Loaded GAFFE JSON (raw frames).
+        analysis:     Output of analyze_single_video().
+        output_dir:   Directory where chart files are saved (created if needed).
+        fmt:          Image format — 'png', 'pdf', or 'svg'.
+        dpi:          Resolution in dots per inch.
+        summary_only: If True (default), generate only the dashboard chart.
+                      If False, also generate individual metric/emotion charts.
 
     Returns:
-        List of saved file paths.
+        List of Path objects for every file that was saved.
     """
     _check_matplotlib()
 
@@ -721,35 +1182,47 @@ def generate_all_charts(
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(analysis.get("source_file", "video")).stem.replace("_gaffe", "")
 
-    saved = []
+    # Detect pipeline method: check analysis dict, then metadata, then frame sniffing.
+    method = analysis.get("detection_method")
+    if not method:
+        method = data.get("metadata", {}).get("detection_method")
+    if not method:
+        for f in data.get("frames", []):
+            if f.get("face_detected"):
+                if "emotions" in f and f.get("emotions") is not None:
+                    method = "fer"
+                elif "metrics" in f and f.get("metrics") is not None:
+                    method = "landmark"
+                break
 
-    # 1. Summary dashboard (the main deliverable)
-    fig = plot_summary_dashboard(data, analysis)
-    path = output_dir / f"{stem}_dashboard.{fmt}"
-    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    saved.append(path)
+    saved: list[Path] = []
 
-    # 2. Individual charts for detailed exploration
-    chart_fns = [
-        ("stress_timeline", plot_stress_timeline),
-        ("metric_contributions", plot_metric_contributions),
-        ("level_distribution", plot_level_distribution),
-        ("blink_rate", plot_blink_rate),
-    ]
-
-    for name, fn in chart_fns:
-        fig = fn(data)
+    def _save(fig, name: str) -> None:
         path = output_dir / f"{stem}_{name}.{fmt}"
-        fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
+        fig.savefig(path, dpi=dpi, bbox_inches="tight",
+                    facecolor=fig.get_facecolor())
         plt.close(fig)
         saved.append(path)
 
-    # Metric bars uses the analysis dict, not raw data
-    fig = plot_metric_bars(analysis)
-    path = output_dir / f"{stem}_metric_bars.{fmt}"
-    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    saved.append(path)
+    if method == "fer":
+        # Summary dashboard (always generated)
+        _save(plot_summary_dashboard_fer(data, analysis), "dashboard")
+        # Individual charts (only when summary_only=False)
+        if not summary_only:
+            _save(plot_stress_timeline(data),           "stress_timeline")
+            _save(plot_level_distribution(data),        "level_distribution")
+            _save(plot_emotion_timeline_fer(data),      "emotion_timeline")
+            _save(plot_emotion_contributions_fer(data), "emotion_contributions")
+            _save(plot_emotion_bars_fer(analysis),      "emotion_bars")
+    else:
+        # Summary dashboard (always generated)
+        _save(plot_summary_dashboard(data, analysis), "dashboard")
+        # Individual charts (only when summary_only=False)
+        if not summary_only:
+            _save(plot_stress_timeline(data),      "stress_timeline")
+            _save(plot_level_distribution(data),   "level_distribution")
+            _save(plot_metric_contributions(data), "metric_contributions")
+            _save(plot_blink_rate(data),           "blink_rate")
+            _save(plot_metric_bars(analysis),      "metric_bars")
 
     return saved

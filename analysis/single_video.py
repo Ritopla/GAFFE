@@ -1,11 +1,16 @@
 """
 Single-video stress analysis from GAFFE JSON output.
 
-Reads a _gaffe.json file produced by demo.py and computes:
-  - Summary statistics (mean, std, median, percentiles, CI)
-  - Temporal profile with windowed segments and trend detection
-  - Peak / valley moment detection
-  - Per-metric contribution breakdown
+Reads a _gaffe.json file produced by detection/detect.py and computes:
+
+  - Summary statistics (mean, std, median, percentiles, CI)        [both]
+  - Temporal profile with windowed segments and trend detection     [both]
+  - Peak / valley detection                                        [both]
+  - Metric contribution breakdown (landmark: bfi / ear / bad)      [landmark]
+  - Emotion contribution breakdown (FER: 7 emotions)               [fer]
+
+The detection method is read from ``metadata.detection_method`` when present;
+otherwise it is inferred by inspecting the first face-detected frame.
 """
 
 from __future__ import annotations
@@ -45,6 +50,33 @@ def load_gaffe_json(path: str | Path) -> dict:
 def _extract_detected_frames(data: dict) -> list[dict]:
     """Extract only frames where a face was detected."""
     return [f for f in data["frames"] if f.get("face_detected", False)]
+
+
+# FER emotion names in canonical order used for breakdowns and summaries.
+FER_EMOTION_NAMES: tuple[str, ...] = (
+    "angry", "disgust", "fear", "happy", "sad", "surprise", "neutral",
+)
+
+
+def detect_method(data: dict) -> str:
+    """
+    Identify the detection pipeline that produced the JSON.
+
+    Returns 'fer', 'landmark', or 'unknown' if the method cannot be determined.
+    """
+    meta = data.get("metadata", {})
+    if "detection_method" in meta:
+        return str(meta["detection_method"])
+
+    # Fallback: inspect the first frame that has a detected face.
+    for f in data.get("frames", []):
+        if f.get("face_detected"):
+            if "emotions" in f and f.get("emotions") is not None:
+                return "fer"
+            if "metrics" in f and f.get("metrics") is not None:
+                return "landmark"
+            break
+    return "unknown"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -248,20 +280,34 @@ def detect_peaks(
     peaks.sort(key=lambda x: x[1], reverse=True)
     valleys.sort(key=lambda x: x[1])
 
+    method = detect_method(data)
+
     def _build_moment(idx: int, score: float, frame: dict) -> dict:
-        """Build a moment description with the dominant metric."""
-        metrics = frame.get("metrics", {})
+        """Build a moment description with the dominant metric/emotion."""
         dominant = "unknown"
-        if metrics:
-            contributions = {}
-            if "bfi" in metrics:
-                contributions["bfi"] = metrics["bfi"]["value"] * 0.45
-            if "ear" in metrics:
-                contributions["ear"] = metrics["ear"]["ear_stress_score"] * 0.35
-            if "bad" in metrics:
-                contributions["bad"] = metrics["bad"]["value"] * 0.20
+
+        if method == "fer":
+            emotions = frame.get("emotions") or {}
+            weights = (frame.get("stress") or {}).get("weights_used", {})
+            contributions = {
+                e: emotions.get(e, 0.0) * w
+                for e, w in weights.items()
+                if e in emotions
+            }
             if contributions:
                 dominant = max(contributions, key=contributions.get)
+        else:  # landmark
+            metrics = frame.get("metrics") or {}
+            if metrics:
+                contributions = {}
+                if "bfi" in metrics:
+                    contributions["bfi"] = metrics["bfi"]["value"] * 0.45
+                if "ear" in metrics:
+                    contributions["ear"] = metrics["ear"]["ear_stress_score"] * 0.35
+                if "bad" in metrics:
+                    contributions["bad"] = metrics["bad"]["value"] * 0.20
+                if contributions:
+                    dominant = max(contributions, key=contributions.get)
 
         return {
             "frame_id": frame_ids[idx],
@@ -387,7 +433,62 @@ def compute_metric_breakdown(data: dict) -> dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────
-# Full single-video analysis
+# Emotion contribution breakdown (FER)
+# ──────────────────────────────────────────────────────────────
+
+
+def compute_emotion_breakdown(data: dict) -> dict[str, Any]:
+    """
+    Analyse the contribution of each FER emotion to the composite stress score.
+
+    For each emotion produces:
+      - raw_mean, raw_std, raw_min, raw_max
+      - weight_used  (from the frame's stress.weights_used field)
+      - weighted_contribution  (mean × weight)
+      - contribution_pct  (percentage of total weighted contribution)
+
+    Emotions not listed in weights_used receive a weight of 0 and therefore
+    do not contribute to the stress score, but their means are still tracked.
+    """
+    frames = _extract_detected_frames(data)
+    if not frames:
+        return {}
+
+    # Collect per-emotion value arrays.
+    values: dict[str, np.ndarray] = {}
+    for name in FER_EMOTION_NAMES:
+        values[name] = np.array(
+            [(f.get("emotions") or {}).get(name, 0.0) for f in frames]
+        )
+
+    # Weights are constant across frames; read from the first detected frame.
+    weights = (frames[0].get("stress") or {}).get("weights_used", {})
+    contributions = {
+        name: float(np.mean(values[name])) * float(weights.get(name, 0.0))
+        for name in FER_EMOTION_NAMES
+    }
+    total_contrib = sum(contributions.values())
+
+    def _pct(val: float) -> float:
+        return round(val / total_contrib * 100, 2) if total_contrib > 1e-9 else 0.0
+
+    breakdown: dict[str, Any] = {}
+    for name in FER_EMOTION_NAMES:
+        arr = values[name]
+        breakdown[name] = {
+            "raw_mean": round(float(np.mean(arr)), 4),
+            "raw_std":  round(float(np.std(arr)),  4),
+            "raw_min":  round(float(np.min(arr)),  4),
+            "raw_max":  round(float(np.max(arr)),  4),
+            "weight_used": float(weights.get(name, 0.0)),
+            "weighted_contribution": round(contributions[name], 4),
+            "contribution_pct": _pct(contributions[name]),
+        }
+    return breakdown
+
+
+# ──────────────────────────────────────────────────────────────
+# Full single-video analysis (dispatcher)
 # ──────────────────────────────────────────────────────────────
 
 
@@ -397,26 +498,40 @@ def analyze_single_video(
     top_n_peaks: int = 5,
 ) -> dict[str, Any]:
     """
-    Run the full analysis pipeline on a single GAFFE JSON file.
+    Full analysis pipeline for a single GAFFE JSON file.
+
+    Detects the pipeline method (landmark or fer) and returns a dict with
+    the common fields (summary, temporal_profile, peaks_and_valleys) plus
+    the method-specific breakdown:
+
+      - ``metric_breakdown``  for landmark (bfi / ear / bad)
+      - ``emotion_breakdown`` for fer (7 emotions)
 
     Args:
         gaffe_json_path: Path to the _gaffe.json file.
-        window_seconds: Duration of temporal segments.
-        top_n_peaks: Number of peak/valley moments to detect.
+        window_seconds:  Duration of each temporal segment.
+        top_n_peaks:     Number of peak / valley moments to detect.
 
     Returns:
-        Complete analysis dictionary ready for JSON serialization.
+        Complete analysis dict, directly JSON-serialisable.
     """
     data = load_gaffe_json(gaffe_json_path)
+    method = detect_method(data)
 
-    analysis = {
+    analysis: dict[str, Any] = {
         "source_file": str(Path(gaffe_json_path).name),
         "video_metadata": data["metadata"],
+        "detection_method": method,
         "summary": compute_summary_stats(data),
         "temporal_profile": compute_temporal_profile(data, window_seconds),
         "peaks_and_valleys": detect_peaks(data, top_n_peaks),
-        "metric_breakdown": compute_metric_breakdown(data),
     }
+
+    if method == "fer":
+        analysis["emotion_breakdown"] = compute_emotion_breakdown(data)
+    else:
+        # default: schema landmark
+        analysis["metric_breakdown"] = compute_metric_breakdown(data)
 
     return analysis
 
