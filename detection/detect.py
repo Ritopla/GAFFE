@@ -12,19 +12,25 @@ Two detection pipelines are available:
       FER library + emotion-based stress scoring (angry + fear + disgust).
       Requires: pip install fer tensorflow
 
+Subcommands:
+    single   Process a single video file (default when no subcommand is given).
+    batch    Process all videos in a directory.
+
 Usage:
-    python -m detection.detect <video> [--method landmark|fer] [options]
+    python -m detection.detect [single] <video> [--method landmark|fer] [options]
+    python -m detection.detect batch <directory> [--method landmark|fer] [options]
 
 Output (written to results/<video_stem>/ by default, overwrites):
     <video_stem>_gaffe.json
 
 Examples:
     python -m detection.detect video.mp4
-    python -m detection.detect video.mp4 --method fer
+    python -m detection.detect single video.mp4 --method fer
     python -m detection.detect video.mp4 --method fer --use-mtcnn
     python -m detection.detect video.mp4 --no-display
     python -m detection.detect video.mp4 -o /custom/path/out.json
     python -m detection.detect video.mp4 --method fer --sample-every 2
+    python -m detection.detect batch /path/to/videos/ --method fer
 """
 
 from __future__ import annotations
@@ -105,32 +111,26 @@ def _run_landmark(
             RunningMode,
         )
     except ImportError:
-        print(
-            "Error: mediapipe is required for the landmark pipeline.\n"
-            "Install it with: pip install mediapipe",
-            file=sys.stderr,
+        raise RuntimeError(
+            "mediapipe is required for the landmark pipeline. "
+            "Install it with: pip install mediapipe"
         )
-        sys.exit(1)
 
     from detection.config import StressConfig
     from detection.stress_scorer import StressScorer
 
     model_path = Path(__file__).parent.parent / "models" / "face_landmarker.task"
     if not model_path.exists():
-        print(
-            f"Error: FaceLandmarker model not found at {model_path}\n"
-            "Download it with:\n"
-            "  curl -L -o models/face_landmarker.task \\\n"
-            "    https://storage.googleapis.com/mediapipe-models/"
-            "face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
-            file=sys.stderr,
+        raise RuntimeError(
+            f"FaceLandmarker model not found at {model_path}. "
+            "Download it with: curl -L -o models/face_landmarker.task "
+            "https://storage.googleapis.com/mediapipe-models/"
+            "face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
         )
-        sys.exit(1)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        print(f"Error: Could not open video: {video_path}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"Could not open video: {video_path}")
 
     fps = fps_override or cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -359,12 +359,10 @@ def _run_fer(
     try:
         from fer.fer import FER
     except ImportError:
-        print(
-            "Error: the 'fer' package is required for the FER pipeline.\n"
-            "Install it with: pip install fer tensorflow",
-            file=sys.stderr,
+        raise RuntimeError(
+            "the 'fer' package is required for the FER pipeline. "
+            "Install it with: pip install fer tensorflow"
         )
-        sys.exit(1)
 
     detector_name = "MTCNN" if use_mtcnn else "Haarcascade"
     print(f"Initialising FER (detector: {detector_name})...")
@@ -373,8 +371,7 @@ def _run_fer(
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        print(f"Error: Could not open video: {video_path}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"Could not open video: {video_path}")
 
     fps = float(fps_override or cap.get(cv2.CAP_PROP_FPS) or 30.0)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -574,42 +571,98 @@ def _save_fer_output(
 
 
 # ──────────────────────────────────────────────────────────────
+# Batch detection
+# ──────────────────────────────────────────────────────────────
+
+_VIDEO_EXTENSIONS: tuple[str, ...] = (".mp4", ".avi", ".mkv", ".mov", ".webm")
+
+
+def _cmd_batch_detect(args: argparse.Namespace) -> None:
+    """Process all videos in a directory with the chosen detection pipeline."""
+    directory = Path(args.directory)
+    if not directory.is_dir():
+        print(f"Error: Not a directory: {directory}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path("results") / directory.name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    method: str = args.method
+
+    videos: list[Path] = []
+    for ext in _VIDEO_EXTENSIONS:
+        videos.extend(directory.glob(f"*{ext}"))
+    videos = sorted(videos)
+
+    if not videos:
+        print(f"No video files found in {directory}")
+        return
+
+    n = len(videos)
+    processed = 0
+    skipped = 0
+    failed = 0
+
+    for i, video_path in enumerate(videos, start=1):
+        gaffe_json = output_dir / f"{video_path.stem}_gaffe.json"
+        prefix = f"[{i}/{n}] {video_path.name}"
+
+        if gaffe_json.exists():
+            print(f"{prefix} — skipped")
+            skipped += 1
+            continue
+
+        print(f"{prefix} — processing...")
+        try:
+            if method == "landmark":
+                _run_landmark(
+                    video_path=video_path,
+                    output_path=gaffe_json,
+                    no_display=True,
+                    fps_override=args.fps_override,
+                )
+            else:
+                _run_fer(
+                    video_path=video_path,
+                    output_path=gaffe_json,
+                    no_display=True,
+                    fps_override=args.fps_override,
+                    use_mtcnn=args.use_mtcnn,
+                    sample_every=args.sample_every,
+                    save_annotated=False,
+                    annotated_path=None,
+                )
+            processed += 1
+        except RuntimeError as exc:
+            print(f"{prefix} — ERROR: {exc}")
+            failed += 1
+
+    print(f"\nDone: {processed} processed, {skipped} skipped, {failed} failed")
+
+
+# ──────────────────────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────────────────────
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="GAFFE — Stress detection from video",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    parser.add_argument("video", type=str, help="Path to the input video file")
-    parser.add_argument(
+def _add_shared_options(p: argparse.ArgumentParser) -> None:
+    """Add options common to both single and batch subcommands."""
+    p.add_argument(
         "--method",
         choices=["landmark", "fer"],
         default="landmark",
         help="Detection pipeline (default: landmark)",
     )
-    parser.add_argument(
-        "-o", "--output",
-        type=str,
-        default=None,
-        help="Output JSON path (default: results/<video_stem>/<video_stem>_gaffe.json)",
-    )
-    parser.add_argument(
-        "--no-display",
-        action="store_true",
-        help="Run headless without showing the video window",
-    )
-    parser.add_argument(
+    p.add_argument(
         "--fps-override",
         type=float,
         default=None,
         help="Override the detected video FPS",
     )
-    # FER-only options
-    fer_group = parser.add_argument_group("FER-specific options (--method fer)")
+    fer_group = p.add_argument_group("FER-specific options (--method fer)")
     fer_group.add_argument(
         "--use-mtcnn",
         action="store_true",
@@ -622,24 +675,83 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="Analyse every Nth frame, record the rest as no-face (default: 1)",
     )
-    fer_group.add_argument(
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """
+    Parse command-line arguments.
+
+    Supports subcommands ``single`` and ``batch``.  If the first positional
+    argument is neither of those it is treated as the video path and the
+    ``single`` subcommand is assumed (backward-compatibility mode).
+    """
+    import sys as _sys
+    raw = argv if argv is not None else _sys.argv[1:]
+
+    # Backward-compat: if first token is not a known subcommand, inject "single"
+    known_subcommands = {"single", "batch"}
+    if raw and raw[0] not in known_subcommands:
+        raw = ["single"] + list(raw)
+
+    parser = argparse.ArgumentParser(
+        description="GAFFE — Stress detection from video",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+
+    # ── single ────────────────────────────────────────────────
+    p_single = sub.add_parser(
+        "single",
+        help="Process a single video file",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_single.add_argument("video", type=str, help="Path to the input video file")
+    p_single.add_argument(
+        "-o", "--output",
+        type=str,
+        default=None,
+        help="Output JSON path (default: results/<video_stem>/<video_stem>_gaffe.json)",
+    )
+    p_single.add_argument(
+        "--no-display",
+        action="store_true",
+        help="Run headless without showing the video window",
+    )
+    _add_shared_options(p_single)
+    p_single.add_argument(
         "--save-annotated",
         action="store_true",
-        help="Save an MP4 with the stress overlay drawn on each frame",
+        help="(FER only) Save an MP4 with the stress overlay drawn on each frame",
     )
-    fer_group.add_argument(
+    p_single.add_argument(
         "--annotated-output",
         type=str,
         default=None,
-        help="Path for the annotated video "
+        help="(FER only) Path for the annotated video "
              "(default: results/<stem>/<stem>_fer_annotated.mp4)",
     )
-    return parser.parse_args()
+
+    # ── batch ─────────────────────────────────────────────────
+    p_batch = sub.add_parser(
+        "batch",
+        help="Process all videos in a directory",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_batch.add_argument("directory", type=str, help="Directory containing video files")
+    p_batch.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for GAFFE JSONs (default: results/<directory_name>/)",
+    )
+    _add_shared_options(p_batch)
+
+    return parser.parse_args(raw)
 
 
-def main() -> None:
-    args = parse_args()
-
+def _cmd_single(args: argparse.Namespace) -> None:
+    """Handle the ``single`` subcommand."""
     video_path = Path(args.video)
     if not video_path.exists():
         print(f"Error: Video file not found: {video_path}", file=sys.stderr)
@@ -647,34 +759,47 @@ def main() -> None:
 
     output_path = Path(args.output) if args.output else _default_output_path(video_path)
 
-    if args.method == "landmark":
-        _run_landmark(
-            video_path=video_path,
-            output_path=output_path,
-            no_display=args.no_display,
-            fps_override=args.fps_override,
-        )
-    else:  # fer
-        if args.save_annotated:
-            if args.annotated_output:
-                annotated_path = Path(args.annotated_output)
+    try:
+        if args.method == "landmark":
+            _run_landmark(
+                video_path=video_path,
+                output_path=output_path,
+                no_display=args.no_display,
+                fps_override=args.fps_override,
+            )
+        else:  # fer
+            if args.save_annotated:
+                if args.annotated_output:
+                    annotated_path = Path(args.annotated_output)
+                else:
+                    ann_dir = Path("results") / video_path.stem
+                    ann_dir.mkdir(parents=True, exist_ok=True)
+                    annotated_path = ann_dir / f"{video_path.stem}_fer_annotated.mp4"
             else:
-                ann_dir = Path("results") / video_path.stem
-                ann_dir.mkdir(parents=True, exist_ok=True)
-                annotated_path = ann_dir / f"{video_path.stem}_fer_annotated.mp4"
-        else:
-            annotated_path = None
+                annotated_path = None
 
-        _run_fer(
-            video_path=video_path,
-            output_path=output_path,
-            no_display=args.no_display,
-            fps_override=args.fps_override,
-            use_mtcnn=args.use_mtcnn,
-            sample_every=args.sample_every,
-            save_annotated=args.save_annotated,
-            annotated_path=annotated_path,
-        )
+            _run_fer(
+                video_path=video_path,
+                output_path=output_path,
+                no_display=args.no_display,
+                fps_override=args.fps_override,
+                use_mtcnn=args.use_mtcnn,
+                sample_every=args.sample_every,
+                save_annotated=args.save_annotated,
+                annotated_path=annotated_path,
+            )
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main() -> None:
+    args = parse_args()
+
+    if args.subcommand == "single":
+        _cmd_single(args)
+    else:
+        _cmd_batch_detect(args)
 
 
 if __name__ == "__main__":

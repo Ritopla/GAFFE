@@ -252,13 +252,20 @@ def _print_batch_summary(result: dict) -> None:
         if grp.get("n_videos", 0) == 0:
             continue
         ss = grp.get("stress_score", {})
-        metrics = grp.get("metrics", {})
+        grp_method = grp.get("detection_method", "landmark")
         print(f"\n  ── {color_label} GROUP ({grp['n_videos']} videos) ────────────")
         print(f"  Stress: μ={ss.get('mean', 0):.4f} ± {ss.get('std', 0):.4f} "
               f"(CI: [{ss.get('ci_95_lower', 0):.4f}, {ss.get('ci_95_upper', 0):.4f}])")
-        print(f"  BFI:    μ={metrics.get('bfi', {}).get('mean', 0):.4f}")
-        print(f"  EAR:    μ={metrics.get('ear_stress', {}).get('mean', 0):.4f}")
-        print(f"  BAD:    μ={metrics.get('bad', {}).get('mean', 0):.4f}")
+        if grp_method == "fer":
+            emotions = grp.get("emotions", {})
+            print(f"  Angry:   μ={emotions.get('angry', {}).get('mean', 0):.4f}")
+            print(f"  Fear:    μ={emotions.get('fear', {}).get('mean', 0):.4f}")
+            print(f"  Disgust: μ={emotions.get('disgust', {}).get('mean', 0):.4f}")
+        else:
+            metrics = grp.get("metrics", {})
+            print(f"  BFI:    μ={metrics.get('bfi', {}).get('mean', 0):.4f}")
+            print(f"  EAR:    μ={metrics.get('ear_stress', {}).get('mean', 0):.4f}")
+            print(f"  BAD:    μ={metrics.get('bad', {}).get('mean', 0):.4f}")
         vid_str = ", ".join(grp.get("videos", []))
         if len(vid_str) > 80:
             vid_str = vid_str[:77] + "..."
@@ -281,11 +288,18 @@ def _print_batch_summary(result: dict) -> None:
         per_metric = comparison.get("per_metric", {})
         if per_metric:
             print(f"\n  ── PER-METRIC EFFECT SIZES ───────────────────")
-            for mk, label in [("bfi", "BFI"), ("ear_stress", "EAR"), ("bad", "BAD")]:
+            # Detect whether the per_metric dict contains landmark or FER keys.
+            _fer_keys = {"angry", "fear", "disgust"}
+            _lm_keys = {"bfi", "ear_stress", "bad"}
+            if per_metric.keys() & _fer_keys:
+                metric_labels = [("angry", "Angry"), ("fear", "Fear"), ("disgust", "Disgust")]
+            else:
+                metric_labels = [("bfi", "BFI"), ("ear_stress", "EAR"), ("bad", "BAD")]
+            for mk, label in metric_labels:
                 mc = per_metric.get(mk, {})
                 me = mc.get("effect_size", {})
                 if me:
-                    print(f"  {label:>5}: d={me.get('cohens_d', 0):+.4f} "
+                    print(f"  {label:>7}: d={me.get('cohens_d', 0):+.4f} "
                           f"({me.get('interpretation', '?')})")
 
     print(f"\n{'═' * 65}\n")
@@ -319,6 +333,7 @@ def _cmd_batch(args: argparse.Namespace) -> None:
         generate_charts=args.charts,
         chart_format=args.chart_format,
         summary_only=not args.all_charts,
+        method=args.method,
     )
 
     save_batch_result(result, output_path)
@@ -501,6 +516,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_batch.add_argument("--process-videos", action="store_true",
                          help="Run detect.py on unprocessed video files first")
+    p_batch.add_argument(
+        "--method",
+        choices=["landmark", "fer"],
+        default="landmark",
+        help="Detection pipeline to use for unprocessed videos (default: landmark). "
+             "Existing JSON files are always auto-detected.",
+    )
     p_batch.add_argument("--charts", action="store_true",
                          help="Generate per-video summary dashboards")
     p_batch.add_argument(
