@@ -13,9 +13,26 @@ env/
 models/
 
 # ── Data & Results (generated, not tracked) ──────────
+datasets
+DATASET_FVAB/
 datasets/
 results/
 charts/
+DOLOS/
+FVAB-DATASETS/
+helper_analysis/
+
+# ── Generated output files (never commit these) ──────
+*_gaffe.json
+*_analysis.json
+*_gaffe_annotated.mp4
+reference_face.jpg
+
+# ── Test / scratch videos (too large for repo) ────────
+# Keep only real dataset paths under datasets/
+CLEANING/*.mp4
+detection/*.mp4
+detection/*.json
 
 # ── OS / IDE ─────────────────────────────────────────
 .DS_Store

@@ -224,14 +224,29 @@ def run_demo_on_video(
     output_dir: Path | None = None,
     model_path: Path | None = None,
     python_path: str = sys.executable,
+    method: str = "landmark",
 ) -> Path | None:
     """
-    Run demo.py on a single video file to produce GAFFE JSON.
+    Run detection/detect.py on a single video file to produce a GAFFE JSON.
 
-    If output_dir is given, the JSON is written there instead of next
-    to the video (which may be on a read-only mount like Google Drive).
+    The script is invoked as a module (``-m detection.detect``) so that
+    package-relative imports work correctly regardless of the caller's cwd.
+    The working directory is always set to the project root (two levels up
+    from this file), which is required for the module resolution to succeed.
 
-    Returns the path to the generated JSON, or None on failure.
+    If output_dir is given the JSON is written there instead of next to the
+    video — useful when the video lives on a read-only mount (e.g. Google Drive).
+
+    Args:
+        video_path:   Path to the source video file.
+        output_dir:   Directory for the output JSON.  Defaults to the video's
+                      parent directory.
+        model_path:   Unused; kept for backward compatibility.
+        python_path:  Python interpreter to invoke.
+        method:       Detection pipeline to use (``"landmark"`` or ``"fer"``).
+
+    Returns:
+        Path to the generated GAFFE JSON, or None on failure.
     """
     if output_dir is not None:
         gaffe_json = output_dir / f"{video_path.stem}_gaffe.json"
@@ -242,21 +257,28 @@ def run_demo_on_video(
     if gaffe_json.exists():
         return gaffe_json
 
-    demo_script = Path(__file__).parent.parent / "detection" / "demo.py"
-    if not demo_script.exists():
-        print(f"  Warning: demo.py not found at {demo_script}", file=sys.stderr)
-        return None
+    # Project root — needed as cwd so `python -m detection.detect` resolves.
+    project_root = Path(__file__).parent.parent
 
+    # Invoke as a module with explicit subcommand so package imports work.
     cmd = [
-        python_path, str(demo_script), str(video_path),
-        "--no-display", "--output", str(gaffe_json),
+        python_path, "-m", "detection.detect", "single",
+        str(video_path),
+        "--method", method,
+        "--no-display",
+        "--output", str(gaffe_json),
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=str(project_root),
         )
         if result.returncode != 0:
-            print(f"  Error processing {video_path.name}: {result.stderr[:200]}",
+            # Print full stderr so errors are visible without truncation.
+            print(f"  Error processing {video_path.name}:\n{result.stderr}",
                   file=sys.stderr)
             return None
     except subprocess.TimeoutExpired:
@@ -274,21 +296,27 @@ def batch_analyze(
     generate_charts: bool = False,
     chart_format: str = "png",
     chart_dpi: int = 150,
+    summary_only: bool = True,
+    method: str = "landmark",
 ) -> dict[str, Any]:
     """
     Analyze all GAFFE JSON files in a directory.
 
-    If process_videos=True, first runs demo.py on any unprocessed video files.
+    If process_videos=True, first runs detect.py on any unprocessed video files.
 
     Args:
-        directory: Path containing video files and/or _gaffe.json files.
-        output_dir: Writable directory for outputs (JSON, charts). If None,
-            defaults to the input directory (requires write access).
-        process_videos: If True, run demo.py on unprocessed videos first.
+        directory:      Path containing video files and/or _gaffe.json files.
+        output_dir:     Writable directory for outputs (JSON, charts). If None,
+                        defaults to the input directory (requires write access).
+        process_videos: If True, run detect.py on unprocessed videos first.
         window_seconds: Temporal window for per-video analysis.
         generate_charts: Generate per-video dashboard charts.
-        chart_format: Chart image format.
-        chart_dpi: Chart DPI.
+        chart_format:   Chart image format ('png', 'pdf', 'svg').
+        chart_dpi:      Chart resolution in DPI.
+        summary_only:   If True (default), generate only the summary dashboard
+                        per video. If False, generate all individual charts.
+        method:         Detection pipeline to use for unprocessed videos
+                        (``"landmark"`` or ``"fer"``).
 
     Returns:
         Complete batch analysis dict with per-video results and group comparison.
@@ -308,7 +336,7 @@ def batch_analyze(
                 print(f"  [{i+1}/{len(videos)}] {vid.name} — already processed")
             else:
                 print(f"  [{i+1}/{len(videos)}] {vid.name} — processing...")
-                run_demo_on_video(vid, output_dir=out_dir)
+                run_demo_on_video(vid, output_dir=out_dir, method=method)
 
     # Step 2: Discover GAFFE JSONs (check both source and output dirs)
     gaffe_files = discover_gaffe_jsons(out_dir)
@@ -340,6 +368,7 @@ def batch_analyze(
                 generate_all_charts(
                     data, analysis, charts_dir,
                     fmt=chart_format, dpi=chart_dpi,
+                    summary_only=summary_only,
                 )
                 print(f"  ✓ {gf.name} (label={label or '?'}) — charts generated")
             except Exception as e:
@@ -354,11 +383,12 @@ def batch_analyze(
             analysis=analysis,
         ))
 
-    # Filter out videos where face detection failed entirely
+    # Filter out videos where face detection failed entirely.
+    # Accept both landmark (metric_breakdown) and FER (emotion_breakdown) outputs.
     valid_results = [
         r for r in results
         if r.analysis.get("summary", {}).get("stress_score") is not None
-        and r.analysis.get("metric_breakdown")
+        and (r.analysis.get("metric_breakdown") or r.analysis.get("emotion_breakdown"))
     ]
 
     # Step 4: Group by label
@@ -375,18 +405,14 @@ def batch_analyze(
             r.analysis["summary"]["stress_score"]["mean"]
             for r in group
         ])
-        bfi_means = np.array([
-            r.analysis["metric_breakdown"]["bfi"]["raw_mean"]
-            for r in group
-        ])
-        ear_means = np.array([
-            r.analysis["metric_breakdown"]["ear"]["raw_mean"]
-            for r in group
-        ])
-        bad_means = np.array([
-            r.analysis["metric_breakdown"]["bad"]["raw_mean"]
-            for r in group
-        ])
+
+        # Determine the predominant detection method in this group.
+        method_counts: dict[str, int] = {}
+        for r in group:
+            m = r.analysis.get("detection_method") or \
+                r.analysis.get("video_metadata", {}).get("detection_method", "landmark")
+            method_counts[m] = method_counts.get(m, 0) + 1
+        predominant_method = max(method_counts, key=lambda k: method_counts[k])
 
         z = 1.96
 
@@ -405,16 +431,49 @@ def batch_analyze(
                 "ci_95_upper": round(min(1.0, mean + z * se), 4),
             }
 
-        return {
+        base: dict[str, Any] = {
             "n_videos": len(group),
             "videos": [r.filename for r in group],
             "stress_score": _summary(stress_means),
-            "metrics": {
-                "bfi": _summary(bfi_means),
-                "ear_stress": _summary(ear_means),
-                "bad": _summary(bad_means),
-            },
+            "detection_method": predominant_method,
         }
+
+        if predominant_method == "fer":
+            fer_group = [r for r in group if r.analysis.get("emotion_breakdown")]
+            if fer_group:
+                base["emotions"] = {
+                    "angry": _summary(np.array([
+                        r.analysis["emotion_breakdown"]["angry"]["raw_mean"]
+                        for r in fer_group
+                    ])),
+                    "fear": _summary(np.array([
+                        r.analysis["emotion_breakdown"]["fear"]["raw_mean"]
+                        for r in fer_group
+                    ])),
+                    "disgust": _summary(np.array([
+                        r.analysis["emotion_breakdown"]["disgust"]["raw_mean"]
+                        for r in fer_group
+                    ])),
+                }
+        else:
+            lm_group = [r for r in group if r.analysis.get("metric_breakdown")]
+            if lm_group:
+                base["metrics"] = {
+                    "bfi": _summary(np.array([
+                        r.analysis["metric_breakdown"]["bfi"]["raw_mean"]
+                        for r in lm_group
+                    ])),
+                    "ear_stress": _summary(np.array([
+                        r.analysis["metric_breakdown"]["ear"]["raw_mean"]
+                        for r in lm_group
+                    ])),
+                    "bad": _summary(np.array([
+                        r.analysis["metric_breakdown"]["bad"]["raw_mean"]
+                        for r in lm_group
+                    ])),
+                }
+
+        return base
 
     truth_agg = _aggregate_group(truth_results)
     lie_agg = _aggregate_group(lie_results)
@@ -433,14 +492,38 @@ def batch_analyze(
         ])
         comparison = compare_groups(truth_stress, lie_stress)
 
-        # Per-metric comparison
-        for metric_key, extract_fn in [
-            ("bfi", lambda r: r.analysis["metric_breakdown"]["bfi"]["raw_mean"]),
-            ("ear_stress", lambda r: r.analysis["metric_breakdown"]["ear"]["raw_mean"]),
-            ("bad", lambda r: r.analysis["metric_breakdown"]["bad"]["raw_mean"]),
-        ]:
-            t_vals = np.array([extract_fn(r) for r in truth_results])
-            l_vals = np.array([extract_fn(r) for r in lie_results])
+        # Determine the predominant method across all valid results.
+        all_methods: dict[str, int] = {}
+        for r in valid_results:
+            m = r.analysis.get("detection_method") or \
+                r.analysis.get("video_metadata", {}).get("detection_method", "landmark")
+            all_methods[m] = all_methods.get(m, 0) + 1
+        predominant = max(all_methods, key=lambda k: all_methods[k]) if all_methods else "landmark"
+
+        # Per-metric/emotion comparison — use only videos matching the predominant method.
+        if predominant == "fer":
+            per_metric_keys = [
+                ("angry",   lambda r: r.analysis["emotion_breakdown"]["angry"]["raw_mean"]),
+                ("fear",    lambda r: r.analysis["emotion_breakdown"]["fear"]["raw_mean"]),
+                ("disgust", lambda r: r.analysis["emotion_breakdown"]["disgust"]["raw_mean"]),
+            ]
+            filter_fn = lambda r: bool(r.analysis.get("emotion_breakdown"))  # noqa: E731
+        else:
+            per_metric_keys = [
+                ("bfi",       lambda r: r.analysis["metric_breakdown"]["bfi"]["raw_mean"]),
+                ("ear_stress", lambda r: r.analysis["metric_breakdown"]["ear"]["raw_mean"]),
+                ("bad",       lambda r: r.analysis["metric_breakdown"]["bad"]["raw_mean"]),
+            ]
+            filter_fn = lambda r: bool(r.analysis.get("metric_breakdown"))  # noqa: E731
+
+        truth_filtered = [r for r in truth_results if filter_fn(r)]
+        lie_filtered = [r for r in lie_results if filter_fn(r)]
+
+        for metric_key, extract_fn in per_metric_keys:
+            if not truth_filtered or not lie_filtered:
+                continue
+            t_vals = np.array([extract_fn(r) for r in truth_filtered])
+            l_vals = np.array([extract_fn(r) for r in lie_filtered])
             metric_comparisons[metric_key] = compare_groups(t_vals, l_vals)
 
     # Step 7: Build output
