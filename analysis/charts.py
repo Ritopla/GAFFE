@@ -117,7 +117,12 @@ def plot_stress_timeline(
     scores = np.array([f["stress"]["score"] for f in frames])
 
     # Smooth
-    kernel = np.ones(smoothing_window) / smoothing_window
+    # Ensure smoothing window is not larger than available samples.
+    # np.convolve(..., mode='same') returns an array with length equal to
+    # the larger of the two inputs, so if `smoothing_window` > len(scores)
+    # we get a longer `smoothed` than `times` which breaks plotting.
+    effective_window = max(1, min(smoothing_window, scores.size))
+    kernel = np.ones(effective_window) / effective_window
     smoothed = np.convolve(scores, kernel, mode="same")
 
     fig, ax = plt.subplots(figsize=figsize)
@@ -499,7 +504,9 @@ def plot_summary_dashboard(
 
     times = np.array([f["frame_id"] / fps for f in frames])
     scores = np.array([f["stress"]["score"] for f in frames])
-    kernel = np.ones(smoothing_window) / smoothing_window
+    # Guard: ensure smoothing window is not larger than available samples.
+    effective_window = max(1, min(smoothing_window, scores.size))
+    kernel = np.ones(effective_window) / effective_window
     smoothed = np.convolve(scores, kernel, mode="same")
 
     # ── Row 1: Stress Timeline ────────────────────────────────

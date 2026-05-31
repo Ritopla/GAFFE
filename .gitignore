@@ -18,6 +18,9 @@ DATASET_FVAB/
 datasets/
 results/
 charts/
+DOLOS/
+FVAB-DATASETS/
+helper_analysis/
 
 # ── Generated output files (never commit these) ──────
 *_gaffe.json
