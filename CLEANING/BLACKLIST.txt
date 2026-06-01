@@ -1,0 +1,17 @@
+BLACKLIST:
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/LIES/BRI_WILTY_EP61_lie_36.mp4 (non c'è una frase)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/TRUTHS/LS_WILTY_EP73_ true5.mp4 (casino di volti)
+Video: /content/drive/MyDrive/DATASET_FVAB/REAL_LIFE_TRIAL/LIES/50.mp4 (no volto ben visibile)
+Video: /content/drive/MyDrive/DATASET_FVAB/REAL_LIFE_TRIAL/LIES/53.mp4 (no volto ben visibile)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/LIES/SB_WILTY_EP41_lie15.mp4 (forse ha senso metterlo senza preprocessing perché taglia 150 frame u 202)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/TRUTHS/BRI_WILTY_EP58_truth_10.mp4 (il bro si mette una mano in faccia ed il modello rileva solo 15 frame con volto; o lo eliminiamo o lo mettiamo per intero)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/TRUTHS/BRI_WILTY_EP58_truth_12.mp4 (il bro non ha capito che non deve gesticolare alzando le mani in faccia)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/TRUTHS/YW_WILTY_EP49_truth9.mp4 (0 frame lasciati dopo pulizia, forse ha senso metterlo tutto)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/LIES/SB_WILTY_EP32_lie5.mp4 (il bro ha deciso di parlare di profilo)
+Video: /content/drive/MyDrive/DATASET_FVAB/REAL_LIFE_TRIAL/TRUTHS/41.mp4 (e che stress vuoi rilevare da qui: la qualità del video è pessima, il soggetto è inquadrato da lontano, salva 238 frame su 340 ma non so quanto sia utile. Petrillo valuta tu)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/TRUTHS/AN_WILTY_EP18_truth3.mp4 (salva 12 frame su 100, ma qualità pessima)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/TRUTHS/AN_WILTY_EP18_truth5.mp4 (solo 22 frame utili su 75, decidete voi)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/LIES/LS_WILTY_EP8_lie12.mp4 (solo 25 frame utili su 75, decidete voi)
+Video: /content/drive/MyDrive/DATASET_FVAB/DOLOS/LIES/LS_WILTY_EP8_lie14.mp4 (solo 30 su 75)
+
+ 
