@@ -25,9 +25,7 @@ GAFFE/
 │   └── charts.py       ← Matplotlib visualization suite
 │
 ├── CLEANING/           ← Dataset pre-processing utilities
-│   ├── reference_extractor.py  ← Identify the main subject in a video
-│   ├── video_filter.py         ← Filter frames by face identity
-│   └── clean_dataset.py        ← End-to-end cleaning script
+│   ├── GAFFE_CLEANING.ipynb ← the complete pipeline followed in order to clean the datasets
 │
 ├── models/             ← ML model assets (not tracked, see below)
 ├── results/            ← All outputs land here (not tracked by git)
